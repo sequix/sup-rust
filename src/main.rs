@@ -16,7 +16,9 @@ fn main() -> Result<()> {
     debug!("action: {} conf: {:?}", action, conf);
 
     if matches!(action, Action::Serve) {
-        server::run(&conf.sup.socket)?;
+        let rotater = rotate::Rotater::new(conf.program.log)?;
+        let process = process::Process::new(conf.program.process, rotater)?;
+        server::run(&conf.sup.socket, process)?;
     } else {
         client::request(&conf.sup.socket, action)?;
     }

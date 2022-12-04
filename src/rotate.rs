@@ -1,11 +1,14 @@
 use crate::config;
 use anyhow::{Context, Result};
-use log::error;
+use flate2::{write::GzEncoder, Compression};
+use log::{error, info};
 use std::{
     ffi::OsStr,
     fs::File,
+    io::BufReader,
     path::Path,
     sync::{Arc, Mutex},
+    thread,
 };
 
 pub struct Rotater {
@@ -13,19 +16,22 @@ pub struct Rotater {
     file: File,
     size: u64,
     write_mutex: Arc<Mutex<()>>,
+    background_mutex: Arc<Mutex<()>>,
 }
 
 impl Rotater {
-    pub fn new(conf: config::Log) -> Result<Rotater> {
+    pub fn new(conf: config::Log) -> Result<Self> {
         let file = Self::new_file(&conf.path)?;
         let size = file.metadata().unwrap().len();
         let write_mutex = Arc::new(Mutex::new(()));
+        let background_mutex = Arc::new(Mutex::new(()));
 
         Ok(Rotater {
             conf,
             file,
             size,
             write_mutex,
+            background_mutex,
         })
     }
 
@@ -34,13 +40,63 @@ impl Rotater {
             .parent()
             .unwrap_or(Path::new("/"));
         let filename = Self::rotated_filename(&self.conf.path);
-        let rotated_path = dir.join(&filename);
+        let rotated_path = String::from(dir.join(&filename).to_str().unwrap());
 
-        std::fs::rename(&self.conf.path, rotated_path)
+        std::fs::rename(&self.conf.path, &rotated_path)
             .context("failed to rename log file to rotated filename")?;
 
         self.file = Self::new_file(&self.conf.path)?;
+        info!("rotated log {} to {rotated_path}", self.conf.path);
 
+        let mu = Arc::clone(&self.background_mutex);
+        let compress = self.conf.compress;
+        let merge_compressed = self.conf.merge_compressed;
+
+        thread::spawn(move || {
+            Self::rotate_background(mu, rotated_path, compress, merge_compressed);
+        });
+
+        Ok(())
+    }
+
+    fn rotate_background(mu: Arc<Mutex<()>>, path: String, compress: bool, merge_compressed: bool) {
+        let _x = mu.lock().unwrap();
+        if compress {
+            if let Err(e) = Self::gzip(&path) {
+                error!("failed to gzip rotated log {path}: {e}");
+            }
+            if merge_compressed {
+                todo!();
+            }
+        }
+        if let Err(e) = Self::clean_extra_backups() {
+            error!("failed to clean extra backups: {e}");
+        }
+    }
+
+    // TODO: 以更标准库的方式处理path AsRef<Path>
+    fn gzip(path: &str) -> Result<()> {
+        let file_input = File::open(path).context("failed to open rotated log to gzip")?;
+        let mut input = BufReader::new(file_input);
+
+        let path_output = format!("{path}.gz");
+        let file_output = File::create(&path_output)
+            .context("failed to open output file for gzipping rotated log")?;
+        let mut output = GzEncoder::new(file_output, Compression::default());
+
+        std::io::copy(&mut input, &mut output).context("failed to gzip rotated log")?;
+
+        output
+            .finish()
+            .context("failed to finish gzipping rotated log")?;
+
+        info!("compressed log {path} to {path_output}");
+
+        Ok(())
+    }
+
+    // TODO:
+    fn clean_extra_backups() -> Result<()> {
         Ok(())
     }
 
@@ -70,7 +126,7 @@ impl Rotater {
 
 impl std::io::Write for Rotater {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        let mutex = self.write_mutex.clone();
+        let mutex = Arc::clone(&self.write_mutex);
         let _x = mutex.lock().unwrap();
 
         let written = self.file.write(buf)?;

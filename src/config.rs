@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fmt::Display, str::FromStr};
+use std::{collections::HashMap, fmt::Display};
 
 use serde::{Deserialize, Serialize};
 
@@ -31,7 +31,7 @@ pub struct Process {
     pub args: Vec<String>,
     pub work_dir: String,
     pub auto_start: bool,
-    pub start_seconds: u32,
+    pub start_seconds: u64,
     pub restart_strategy: String,
     pub envs: HashMap<String, String>,
 }
@@ -70,21 +70,6 @@ impl Display for Action {
             Action::Kill => write!(f, "kill"),
             Action::Status => write!(f, "status"),
             Action::Exit => write!(f, "exit"),
-        }
-    }
-}
-
-impl From<Action> for String {
-    fn from(value: Action) -> Self {
-        match value {
-            Action::Serve => "serve".into(),
-            Action::Start => "start".into(),
-            Action::Stop => "stop".into(),
-            Action::Restart => "restart".into(),
-            Action::Reload => "reload".into(),
-            Action::Kill => "kill".into(),
-            Action::Status => "status".into(),
-            Action::Exit => "exit".into(),
         }
     }
 }
