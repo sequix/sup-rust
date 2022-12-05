@@ -1,3 +1,5 @@
+// TODO: global immutable config with lazy_static
+
 use std::{collections::HashMap, fmt::Display};
 
 use serde::{Deserialize, Serialize};
@@ -32,7 +34,7 @@ pub struct Process {
     pub work_dir: String,
     pub auto_start: bool,
     pub start_seconds: u64,
-    pub restart_strategy: String,
+    pub restart_strategy: RestartStrategy,
     pub envs: HashMap<String, String>,
 }
 
@@ -45,6 +47,30 @@ pub struct Log {
     pub max_days: u32,
     pub max_backups: u32,
     pub max_size: u64,
+}
+
+// TODO: PartialEq、Clone derive 啥意思？？？
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum RestartStrategy {
+    None,
+    Always,
+    OnFailure,
+}
+
+impl Default for RestartStrategy {
+    fn default() -> Self {
+        RestartStrategy::Always
+    }
+}
+
+impl Display for RestartStrategy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RestartStrategy::None => write!(f, "none"),
+            RestartStrategy::Always => write!(f, "always"),
+            RestartStrategy::OnFailure => write!(f, "on-failure"),
+        }
+    }
 }
 
 #[derive(Debug)]

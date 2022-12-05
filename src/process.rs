@@ -2,7 +2,6 @@ use std::fmt::Display;
 use std::ops::DerefMut;
 use std::process;
 use std::process::Stdio;
-use std::sync::mpsc;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
@@ -13,42 +12,60 @@ use anyhow::format_err;
 use anyhow::Context;
 use anyhow::Result;
 use log::info;
+use nix::sys::signal;
+use nix::sys::signal::Signal;
 use nix::sys::stat;
 use nix::unistd;
+use nix::unistd::Pid;
 
 pub struct Process {
-    pid: Option<u32>,
+    inner: Arc<ProcessInner>,
+}
+
+struct ProcessInner {
     conf: config::Process,
     rotater: Arc<Mutex<rotate::Rotater>>,
-    action_mutex: Mutex<()>,
-    action_sender: mpsc::Sender<ProcessAction>,
-    action_receiver: mpsc::Receiver<ProcessAction>,
+    id_status: Arc<Mutex<ProcessIdStatus>>,
+}
+
+struct ProcessIdStatus {
+    pid: Option<u32>,
+    desired_status: ProcessStatus,
 }
 
 impl Process {
     pub fn new(conf: config::Process, rotater: rotate::Rotater) -> Result<Self> {
-        let pid = None;
         let rotater = Arc::new(Mutex::new(rotater));
-        let action_mutex = Mutex::new(());
-        let (action_sender, action_receiver) = mpsc::channel();
 
-        let mut p = Process {
-            pid,
+        let id_status = Arc::new(Mutex::new(ProcessIdStatus {
+            pid: None,
+            desired_status: ProcessStatus::None,
+        }));
+
+        let inner = Arc::new(ProcessInner {
             conf,
             rotater,
-            action_mutex,
-            action_sender,
-            action_receiver,
-        };
+            id_status,
+        });
 
-        if p.conf.auto_start {
-            p.pid = Some(p.new_child().context("failed to start process")?);
+        let p = Process { inner };
+
+        if p.inner.conf.auto_start {
+            let pid = p.call_new_child()?;
+            let mut is = p.inner.id_status.lock().unwrap();
+            is.pid = Some(pid);
+            is.desired_status = ProcessStatus::Running;
         }
 
         Ok(p)
     }
 
-    fn new_child(&mut self) -> Result<u32> {
+    fn call_new_child(&self) -> Result<u32> {
+        let inner = Arc::clone(&self.inner);
+        Self::new_child(inner)
+    }
+
+    fn new_child(inner: Arc<ProcessInner>) -> Result<u32> {
         let tmp_path = tempfile::NamedTempFile::new().unwrap().into_temp_path();
         let fifo_path = Arc::new(tmp_path.to_path_buf());
         tmp_path.close()?;
@@ -57,7 +74,7 @@ impl Process {
             .context("failed to create log fifo")?;
         info!("created fifo for log at {:?}", fifo_path);
 
-        let rotater = Arc::clone(&self.rotater);
+        let rotater = Arc::clone(&inner.rotater);
         let fifo_path_redirect = fifo_path.clone();
 
         thread::spawn(move || {
@@ -77,8 +94,8 @@ impl Process {
             .try_clone()
             .context("failed to oen fifo for stderr redirecting")?;
 
-        let mut child = process::Command::new(&self.conf.path)
-            .args(&self.conf.args)
+        let mut child = process::Command::new(&inner.conf.path)
+            .args(&inner.conf.args)
             .stdout(Stdio::from(log_stdout))
             .stderr(Stdio::from(log_stderr))
             .spawn()
@@ -87,82 +104,122 @@ impl Process {
         info!("spawned child process");
         std::fs::remove_file(fifo_path.as_path()).context("failed to remove log fifo")?;
 
-        thread::sleep(std::time::Duration::from_secs(self.conf.start_seconds));
+        thread::sleep(std::time::Duration::from_secs(inner.conf.start_seconds));
 
         let pid = child.id();
         let stat = ProcessStatus::get(pid)?;
 
         match stat {
-            ProcessStatus::Running | ProcessStatus::Sleeping | ProcessStatus::Waiting => {}
+            ProcessStatus::Running => {}
             ProcessStatus::None => return Err(format_err!("process exited very quickly")),
-            _ => return Err(format_err!("process in state: {stat}")),
+            _ => return Err(format_err!("process in state: {}", stat)),
         }
 
-        let sender_for_exited = self.action_sender.clone();
+        let inner = Arc::clone(&inner);
 
         thread::spawn(move || {
-            let e = child.wait().unwrap();
-            sender_for_exited
-                .send(ProcessAction::ProcessExited(e))
-                .expect("faield to send process exited action");
+            let es = child.wait().unwrap();
+            let mut is = inner.id_status.lock().unwrap();
+
+            if matches!(is.desired_status, ProcessStatus::None) {
+                return;
+            }
+
+            match inner.conf.restart_strategy {
+                config::RestartStrategy::None => {}
+                config::RestartStrategy::Always => {
+                    let inner = Arc::clone(&inner);
+                    is.pid = Some(Self::new_child(inner).expect("failed to restart process"));
+                }
+                config::RestartStrategy::OnFailure => {
+                    if !es.success() {
+                        let inner = Arc::clone(&inner);
+                        is.pid = Some(Self::new_child(inner).expect("failed to restart process"));
+                    }
+                }
+            }
         });
 
         Ok(pid)
     }
 
-    fn waiter(&mut self) -> ! {
-        loop {
-            let action = self
-                .action_receiver
-                .recv()
-                .expect("failed to receive process action");
-            match action {
-                ProcessAction::UserAction(action) => match action {
-                    config::Action::Start => todo!(),
-                    _ => todo!(),
-                },
-                ProcessAction::ProcessExited(e) => {}
-            }
-        }
-    }
-
     pub fn start(&mut self) -> Result<()> {
-        let _mu = self.action_mutex.lock().unwrap();
-        todo!();
+        let mut is = self.inner.id_status.lock().unwrap();
+        is.desired_status = ProcessStatus::Running;
+
+        if is.pid.is_none() {
+            is.pid = Some(self.call_new_child()?);
+        }
+        Ok(())
     }
 
     pub fn stop(&mut self) -> Result<()> {
-        let _mu = self.action_mutex.lock().unwrap();
-        todo!();
+        let mut is = self.inner.id_status.lock().unwrap();
+        is.desired_status = ProcessStatus::None;
+
+        if is.pid.is_some() {
+            let pid = is.pid.take().unwrap();
+            signal::kill(Pid::from_raw(pid as i32), Signal::SIGTERM)
+                .context("failed to send SIGTERM to child process")?;
+            Self::wait_for_none(pid)?;
+        }
+        Ok(())
     }
 
     pub fn reload(&mut self) -> Result<()> {
-        let _mu = self.action_mutex.lock().unwrap();
-        todo!();
+        let is = self.inner.id_status.lock().unwrap();
+
+        if is.pid.is_some() {
+            let pid = is.pid.unwrap();
+            signal::kill(Pid::from_raw(pid as i32), Signal::SIGHUP)
+                .context("failed to send SIGHUP to child process")?;
+        }
+        Ok(())
     }
 
     pub fn kill(&mut self) -> Result<()> {
-        let _mu = self.action_mutex.lock().unwrap();
-        todo!();
+        let mut is = self.inner.id_status.lock().unwrap();
+        is.desired_status = ProcessStatus::None;
+
+        if is.pid.is_some() {
+            let pid = is.pid.take().unwrap();
+            signal::kill(Pid::from_raw(pid as i32), Signal::SIGKILL)
+                .context("failed to send SIGKILL to child process")?;
+            Self::wait_for_none(pid)?;
+        }
+        Ok(())
+    }
+
+    fn wait_for_none(pid: u32) -> Result<()> {
+        loop {
+            let stat = ProcessStatus::get(pid)?;
+            if matches!(stat, ProcessStatus::None) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        Ok(())
     }
 
     pub fn status(&self) -> Result<String> {
-        let _mu = self.action_mutex.lock().unwrap();
-        todo!();
+        let is = self.inner.id_status.lock().unwrap();
+        let pid = is.pid;
+
+        if pid.is_none() {
+            Ok(String::from("NotStarted"))
+        } else {
+            let status = ProcessStatus::get(pid.unwrap())?;
+            Ok(format!("{status}"))
+        }
     }
 }
 
 // /proc/[pid]/stat in https://man7.org/linux/man-pages/man5/proc.5.html
 #[derive(Debug)]
 enum ProcessStatus {
-    None,     // process not existing
-    Running,  // R
-    Sleeping, // S
-    Waiting,  // D
-    Zombie,   // Z
-    Stopped,  // T
-    Tracing,  // t
-    Dead,     // X or x
+    None,    // process not existing
+    Running, // R | S | D
+    Zombie,  // Z
     Unknown(String),
 }
 
@@ -180,13 +237,8 @@ impl ProcessStatus {
         let stat = stat.split_whitespace().skip(2).next().unwrap();
 
         match stat {
-            "R" => Ok(ProcessStatus::Running),
-            "S" => Ok(ProcessStatus::Sleeping),
-            "D" => Ok(ProcessStatus::Waiting),
+            "R" | "S" | "D" => Ok(ProcessStatus::Running),
             "Z" => Ok(ProcessStatus::Zombie),
-            "T" => Ok(ProcessStatus::Stopped),
-            "t" => Ok(ProcessStatus::Tracing),
-            "X" | "x" => Ok(ProcessStatus::Dead),
             _ => Ok(ProcessStatus::Unknown(String::from(stat))),
         }
     }
@@ -197,28 +249,8 @@ impl Display for ProcessStatus {
         match self {
             ProcessStatus::None => write!(f, "NotStarted"),
             ProcessStatus::Running => write!(f, "Running"),
-            ProcessStatus::Sleeping => write!(f, "Sleeping"),
-            ProcessStatus::Waiting => write!(f, "Waiting"),
             ProcessStatus::Zombie => write!(f, "Zombe"),
-            ProcessStatus::Stopped => write!(f, "Stopped"),
-            ProcessStatus::Tracing => write!(f, "Tracing"),
-            ProcessStatus::Dead => write!(f, "Dead"),
             ProcessStatus::Unknown(s) => write!(f, "Unknown({s})"),
-        }
-    }
-}
-
-#[derive(Debug)]
-enum ProcessAction {
-    UserAction(config::Action),
-    ProcessExited(process::ExitStatus),
-}
-
-impl Display for ProcessAction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ProcessAction::UserAction(t) => t.fmt(f),
-            ProcessAction::ProcessExited(e) => write!(f, "exited({e})"),
         }
     }
 }
