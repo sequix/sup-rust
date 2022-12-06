@@ -72,7 +72,6 @@ impl Process {
 
         unistd::mkfifo(fifo_path.as_path(), stat::Mode::S_IRWXU)
             .context("failed to create log fifo")?;
-        info!("created fifo for log at {:?}", fifo_path);
 
         let rotater = Arc::clone(&inner.rotater);
         let fifo_path_redirect = fifo_path.clone();
@@ -94,8 +93,10 @@ impl Process {
             .try_clone()
             .context("failed to oen fifo for stderr redirecting")?;
 
-        let mut child = process::Command::new(&inner.conf.path)
+        // TODO: env variables & work dir
+        let child = process::Command::new(&inner.conf.path)
             .args(&inner.conf.args)
+            .stdin(Stdio::null())
             .stdout(Stdio::from(log_stdout))
             .stderr(Stdio::from(log_stderr))
             .spawn()
@@ -105,42 +106,46 @@ impl Process {
         std::fs::remove_file(fifo_path.as_path()).context("failed to remove log fifo")?;
 
         thread::sleep(std::time::Duration::from_secs(inner.conf.start_seconds));
-
         let pid = child.id();
         let stat = ProcessStatus::get(pid)?;
 
         match stat {
             ProcessStatus::Running => {}
             ProcessStatus::None => return Err(format_err!("process exited very quickly")),
+            // TODO: zombie
             _ => return Err(format_err!("process in state: {}", stat)),
         }
 
         let inner = Arc::clone(&inner);
+        thread::spawn(move || Self::child_waiter(inner, child));
 
-        thread::spawn(move || {
-            let es = child.wait().unwrap();
-            let mut is = inner.id_status.lock().unwrap();
+        Ok(pid)
+    }
 
-            if matches!(is.desired_status, ProcessStatus::None) {
-                return;
+    fn child_waiter(inner: Arc<ProcessInner>, mut child: process::Child) {
+        let es = child.wait().unwrap();
+        info!("child process exited with code {}", es.code().unwrap());
+
+        let mut is = inner.id_status.lock().unwrap();
+        is.pid.take();
+
+        if matches!(is.desired_status, ProcessStatus::None) {
+            return;
+        }
+
+        match inner.conf.restart_strategy {
+            config::RestartStrategy::None => {}
+            config::RestartStrategy::Always => {
+                let inner = Arc::clone(&inner);
+                is.pid = Some(Self::new_child(inner).expect("failed to restart process"));
             }
-
-            match inner.conf.restart_strategy {
-                config::RestartStrategy::None => {}
-                config::RestartStrategy::Always => {
+            config::RestartStrategy::OnFailure => {
+                if !es.success() {
                     let inner = Arc::clone(&inner);
                     is.pid = Some(Self::new_child(inner).expect("failed to restart process"));
                 }
-                config::RestartStrategy::OnFailure => {
-                    if !es.success() {
-                        let inner = Arc::clone(&inner);
-                        is.pid = Some(Self::new_child(inner).expect("failed to restart process"));
-                    }
-                }
             }
-        });
-
-        Ok(pid)
+        }
     }
 
     pub fn start(&mut self) -> Result<()> {
@@ -249,8 +254,26 @@ impl Display for ProcessStatus {
         match self {
             ProcessStatus::None => write!(f, "NotStarted"),
             ProcessStatus::Running => write!(f, "Running"),
-            ProcessStatus::Zombie => write!(f, "Zombe"),
+            ProcessStatus::Zombie => write!(f, "Zombie"),
             ProcessStatus::Unknown(s) => write!(f, "Unknown({s})"),
         }
     }
 }
+
+/*
+// TODO: unit test
+
+// mantaining:
+1.process exit quicker than start_seconds
+2.process exit later than start_seconds, and diff restart_strategy
+3.process env & workdir
+
+// action:
+1.auto_start false & start action
+2.running & stop action & start action & stop action
+
+// log:
+1.redirect both stdout & stderr
+2.logrotate file & compress
+3.delete extra logs & merge gzips
+*/

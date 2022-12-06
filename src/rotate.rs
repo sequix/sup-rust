@@ -59,11 +59,16 @@ impl Rotater {
         Ok(())
     }
 
-    fn rotate_background(mu: Arc<Mutex<()>>, path: String, compress: bool, merge_compressed: bool) {
+    fn rotate_background<P: AsRef<Path>>(
+        mu: Arc<Mutex<()>>,
+        path: P,
+        compress: bool,
+        merge_compressed: bool,
+    ) {
         let _x = mu.lock().unwrap();
         if compress {
-            if let Err(e) = Self::gzip(&path) {
-                error!("failed to gzip rotated log {path}: {e}");
+            if let Err(e) = Self::gzip(path) {
+                error!("failed to gzip rotated log: {e}");
             }
             if merge_compressed {
                 todo!();
@@ -74,12 +79,12 @@ impl Rotater {
         }
     }
 
-    // TODO: 以更标准库的方式处理path AsRef<Path>
-    fn gzip(path: &str) -> Result<()> {
+    fn gzip<P: AsRef<Path>>(path: P) -> Result<()> {
+        let path = path.as_ref();
         let file_input = File::open(path).context("failed to open rotated log to gzip")?;
         let mut input = BufReader::new(file_input);
 
-        let path_output = format!("{path}.gz");
+        let path_output = format!("{}.gz", path.as_os_str().to_str().unwrap());
         let file_output = File::create(&path_output)
             .context("failed to open output file for gzipping rotated log")?;
         let mut output = GzEncoder::new(file_output, Compression::default());
@@ -90,18 +95,20 @@ impl Rotater {
             .finish()
             .context("failed to finish gzipping rotated log")?;
 
-        info!("compressed log {path} to {path_output}");
+        info!(
+            "compressed log {} to {path_output}",
+            path.as_os_str().to_str().unwrap()
+        );
 
         Ok(())
     }
 
-    // TODO:
     fn clean_extra_backups() -> Result<()> {
-        Ok(())
+        todo!();
     }
 
-    fn new_file(path: &str) -> Result<File> {
-        let dir = Path::new(path).parent().unwrap();
+    fn new_file<P: AsRef<Path>>(path: P) -> Result<File> {
+        let dir = path.as_ref().parent().unwrap_or(Path::new("/"));
         if !dir.exists() {
             std::fs::create_dir_all(dir).context("failed to create parent directory for log")?;
         }
@@ -120,7 +127,7 @@ impl Rotater {
         let path = Path::new(path);
         let ext = path.extension().and_then(OsStr::to_str).unwrap_or_default();
         let stem = path.file_stem().and_then(OsStr::to_str).unwrap_or_default();
-        format!("{stem}-{}{ext}", now.format("%Y%m%d%H%M%S"))
+        format!("{stem}-{}.{ext}", now.format("%Y%m%d%H%M%S"))
     }
 }
 
@@ -133,7 +140,7 @@ impl std::io::Write for Rotater {
 
         self.size += written as u64;
 
-        if self.conf.max_size > 0 && self.size > self.conf.max_size {
+        if self.conf.max_size > 0 && self.size > self.conf.max_size * 1024 * 1024 {
             if let Err(e) = self.rotate() {
                 error!("failed to rotate log {e}");
             }

@@ -8,15 +8,15 @@ socket = "./sup.sock"
 # Config related with process.
 [program.process]
 # Path to an executable, which would spawn the supervised process.
-path = "/bin/sleep"
+path = "./test.sh"
 # Arguments to the supervised process.
-args = ["5"]
+args = []
 # Working directory of the supervised process. Current directory by default.
 workDir = "./"
 # Start the process as Sup goes up. False by default.
-autoStart = false
+autoStart = true
 # Sup waits 'startSeconds' after each start to avoid the process restarts too rapidly.
-startSeconds = 5
+startSeconds = 3
 # How to react when the supervised process went down. One of 'on-failure', 'always', 'none'. 'on-failure' by default.
 restartStrategy = "on-failure"
 # Environment variables to the supervised process.
@@ -27,7 +27,7 @@ ENV_VAR2 = "val2"
 # Config related with log. Log will be acquired from stdout and stderr only.
 [program.log]
 # Path where to save the current un-rotated log. Using basename of the supervised process by default.
-path = "./tail.log"
+path = "./test.log"
 # Whether the rotated log files should be compressed with gzip, no compression by default.
 compress = false
 # Whether the gzipped backups would be merged or not, no merging by default.

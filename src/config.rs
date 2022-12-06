@@ -52,8 +52,11 @@ pub struct Log {
 // TODO: PartialEq、Clone derive 啥意思？？？
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum RestartStrategy {
+    #[serde(rename = "none")]
     None,
+    #[serde(rename = "always")]
     Always,
+    #[serde(rename = "on-failure")]
     OnFailure,
 }
 
