@@ -1,5 +1,3 @@
-// TODO: global immutable config with lazy_static
-
 use std::{collections::HashMap, fmt::Display};
 
 use serde::{Deserialize, Serialize};
