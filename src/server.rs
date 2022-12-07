@@ -4,11 +4,15 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::{config, process};
+use crate::{
+    config::{self, Config},
+    process,
+};
 use anyhow::{format_err, Context, Result};
 use log::{error, info};
 
-pub fn run(socket: &str, process: process::Process) -> Result<()> {
+pub fn run(process: process::Process) -> Result<()> {
+    let socket = &Config::get().sup.socket;
     let process = Arc::new(Mutex::new(process));
     run_stop_singal_handler(Arc::clone(&process))?;
     run_server(socket, Arc::clone(&process))?;
@@ -98,7 +102,6 @@ fn handle_client(mut c: UnixStream, process: Arc<Mutex<process::Process>>) -> Re
             Err(e) => Err(format_err!("{e}")),
         },
         Action::Serve => Err(format_err!("do not support action {action}")),
-        
     };
 
     let rsp = match rsp {

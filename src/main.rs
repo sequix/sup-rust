@@ -6,21 +6,19 @@ mod server;
 
 use anyhow::Result;
 use config::Action;
-use log::debug;
 use std::{io::Write, str::FromStr};
 
 fn main() -> Result<()> {
     init_logger();
 
-    let (conf, action) = config::new()?;
-    debug!("action: {} conf: {:?}", action, conf);
+    let action = Action::from_args()?;
 
     if matches!(action, Action::Serve) {
-        let rotater = rotate::Rotater::new(conf.program.log)?;
-        let process = process::Process::new(conf.program.process, rotater)?;
-        server::run(&conf.sup.socket, process)?;
+        let rotater = rotate::Rotater::new()?;
+        let process = process::Process::new(rotater)?;
+        server::run(process)?;
     } else {
-        client::request(&conf.sup.socket, action)?;
+        client::request(action)?;
     }
 
     Ok(())

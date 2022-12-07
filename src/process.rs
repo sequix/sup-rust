@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use std::thread;
 
 use crate::config;
+use crate::config::Config;
 use crate::rotate;
 use anyhow::format_err;
 use anyhow::Context;
@@ -34,7 +35,8 @@ struct ProcessIdStatus {
 }
 
 impl Process {
-    pub fn new(conf: config::Process, rotater: rotate::Rotater) -> Result<Self> {
+    pub fn new(rotater: rotate::Rotater) -> Result<Self> {
+        let conf = Config::get().program.process.clone();
         let rotater = Arc::new(Mutex::new(rotater));
 
         let id_status = Arc::new(Mutex::new(ProcessIdStatus {

@@ -4,16 +4,17 @@ use std::{
     path::Path,
 };
 
-use crate::config::Action;
+use crate::config::{Action, Config};
 use anyhow::{format_err, Context, Result};
 
-pub fn request(socket: &str, action: Action) -> Result<String> {
+pub fn request(action: Action) -> Result<String> {
     if matches!(action, Action::Serve) {
         Err(format_err!(
             "client does not support the action {}",
             Action::Serve
         ))?;
     }
+    let socket = &Config::get().sup.socket;
 
     let mut conn =
         UnixStream::connect(Path::new(socket)).context("failed to connect to sup socket")?;

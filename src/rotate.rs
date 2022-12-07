@@ -1,4 +1,4 @@
-use crate::config;
+use crate::config::{self, Config};
 use anyhow::{Context, Result};
 use flate2::{write::GzEncoder, Compression};
 use log::{error, info};
@@ -20,7 +20,9 @@ pub struct Rotater {
 }
 
 impl Rotater {
-    pub fn new(conf: config::Log) -> Result<Self> {
+    pub fn new() -> Result<Self> {
+        // TODO: 能否不 clone，同时减少 lifetime quailifier 的使用？
+        let conf = Config::get().program.log.clone();
         let file = Self::new_file(&conf.path)?;
         let size = file.metadata().unwrap().len();
         let write_mutex = Arc::new(Mutex::new(()));

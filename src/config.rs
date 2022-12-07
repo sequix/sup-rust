@@ -1,14 +1,37 @@
-use std::{collections::HashMap, fmt::Display};
+use std::{collections::HashMap, fmt::Display, sync::Arc};
 
+use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
 
 use anyhow::{Context, Result};
+
+// TODO：lazy_static 怎么实现的
+lazy_static! {
+    static ref CONFIG: Arc<Config> = Arc::new(Config::from_args().unwrap());
+}
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Config {
     pub sup: Sup,
     pub program: Program,
+}
+
+impl Config {
+    fn from_args() -> Result<Self> {
+        let args: Vec<String> = std::env::args().collect();
+        check_args(&args);
+
+        let conf_path = &args[2];
+        let conf = std::fs::read_to_string(conf_path)
+            .context(format!("failed to read config file {}", conf_path))?;
+        let conf: Config = toml::from_str(&conf)
+            .context(format!("failed to deserialize config file {}", conf_path))?;
+        Ok(conf)
+    }
+    pub fn get() -> Arc<Config> {
+        Arc::clone(&CONFIG)
+    }
 }
 
 #[derive(Default, Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -86,6 +109,19 @@ pub enum Action {
     Exit,
 }
 
+impl Action {
+    pub fn from_args() -> Result<Action> {
+        let args: Vec<String> = std::env::args().collect();
+        check_args(&args);
+
+        let mut action = String::from("serve");
+        if args.len() == 4 {
+            action = args[3].clone();
+        }
+        Ok(Action::from(action.as_str()))
+    }
+}
+
 impl Display for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -117,9 +153,7 @@ impl From<&str> for Action {
     }
 }
 
-pub fn new() -> Result<(Config, Action)> {
-    let args: Vec<String> = std::env::args().collect();
-
+fn check_args(args: &Vec<String>) {
     if args.len() < 2 || args.len() > 4 {
         print_help();
         std::process::exit(1);
@@ -136,17 +170,6 @@ pub fn new() -> Result<(Config, Action)> {
         println!("expected config file path after flag '-c'");
         std::process::exit(1);
     }
-    let conf_path = &args[2];
-    let conf = std::fs::read_to_string(conf_path)
-        .context(format!("failed to read config file {}", conf_path))?;
-    let conf: Config = toml::from_str(&conf)
-        .context(format!("failed to deserialize config file {}", conf_path))?;
-
-    let mut action = String::from("serve");
-    if args.len() == 4 {
-        action = args[3].clone();
-    }
-    Ok((conf, Action::from(action.as_str())))
 }
 
 fn print_help() {
